@@ -99,10 +99,19 @@ makeDeepBlock=function(item,key,kind){
 // Mandatory per-topic practice: no skipping and no chance to overwrite first attempt.
 renderPractice=function(){
  const list=getPractice(),el=$('study-content');el.replaceChildren();if(!list.length)return;
- const first=list.findIndex(p=>!finalState.practice[p.index]);const index=first<0?list.length-1:first;state.pIdx=index;
+ // The earliest unresolved task is the only task currently available.
+ let index=list.findIndex(p=>{
+   const attempt=finalState.practice[p.index];
+   if(!attempt)return true;
+   if(attempt.ok)return false;
+   const r=finalState.recovery[`practice:${p.index}`];
+   return !(r&&r[0]&&r[1]) && !finalState.practiceDefer?.[p.index];
+ });
+ if(index<0)index=list.length-1;
+ state.pIdx=index;
  const p=list[index],entry=finalState.practice[p.index];
  const card=document.createElement('div');card.className='qcard';
- card.innerHTML=`<p class="tiny">Обов’язкова задача ${index+1} / ${list.length}. Підтвердження лише один раз.</p><h3>${escapeHTML(p.q)}</h3>`;
+ card.innerHTML=`<p class="tiny">Обов’язкова задача ${index+1} / ${list.length} · перша спроба не змінюється</p><h3>${escapeHTML(p.q)}</h3>`;
  if(p.choices){p.choices.forEach((x,i)=>{const label=document.createElement('label');label.className='choice';const input=document.createElement('input');input.type='radio';input.name='finalpractice';input.value=i;if(entry){input.disabled=true;input.checked=String(entry.answer)===String(i)}label.append(input,document.createTextNode(x));card.append(label)})}
  else{const input=document.createElement('input');input.type='text';input.inputMode='decimal';input.placeholder='Введи число';if(entry){input.disabled=true;input.value=entry.answer;}card.append(input,document.createTextNode(' '+(p.unit||'')))}
  const actions=document.createElement('div');actions.className='btnrow';
@@ -110,82 +119,18 @@ renderPractice=function(){
  actions.append(button('Зафіксувати відповідь',()=>{const sel=p.choices?card.querySelector('input[type=radio]:checked'):card.querySelector('input[type=text]');submit(sel?sel.value:null)},'primary'));
  actions.append(button('Не знаю',()=>submit('Не знаю'),'secondary'));
  }else{
- const f=document.createElement('div');f.className='feedback'+(entry.ok?'':' bad');f.innerHTML=`<b>${entry.ok?'Правильно.':'Перша відповідь була неправильною.'}</b><p>${escapeHTML(p.why)}</p><p class="tiny">Перший результат збережено без виправлень.</p>`;card.append(f);
+ const f=document.createElement('div');f.className='feedback'+(entry.ok?'':' bad');f.innerHTML=`<b>${entry.ok?'Правильно.':'Перша відповідь була неправильною.'}</b><p>${escapeHTML(p.why)}</p><p class="tiny">Перша спроба збережена назавжди в межах локального проходження.</p>`;card.append(f);
  if(!entry.ok)showRecovery(card,'practice',String(p.index),p.lesson);
- const recovered=entry.ok||!!(finalState.recovery[`practice:${p.index}`]?.[1]);
- if(index<list.length-1){const next=button('Наступна обов’язкова задача →',()=>{renderPractice()},'primary');next.disabled=!recovered;actions.append(next)}
- else actions.append(button('Переглянути результат',()=>view('results'),'primary'));
+ const r=finalState.recovery[`practice:${p.index}`],recovered=entry.ok||!!(r&&r[0]&&r[1])||!!finalState.practiceDefer?.[p.index];
+ if(!recovered && r&&r[0]&& !r[0].ok){
+    // No dead end: parent can see the gap, learner may continue after two correction attempts.
+ }
+ if(index<list.length-1){
+   const next=button('Наступна обов’язкова задача →',()=>{renderPractice()},'primary');next.disabled=!recovered;actions.append(next);
+   if(!recovered && r&&r[0]&&r[1]){
+     actions.append(button('Продовжити з прогалиною',()=>{finalState.practiceDefer ||= {};finalState.practiceDefer[p.index]=true;finalSave();renderPractice()},'secondary'));
+   }
+ }else actions.append(button('Переглянути результат',()=>view('results'),'primary'));
  }
  card.append(actions);el.append(card);
 };
-// Challenge assessment: show only first unanswered item, with no forward jump.
-renderDeepChallenges=function(){
- const root=$('challenges-content');root.replaceChildren();
- const title=document.createElement('div');title.className='challenge-intro';title.innerHTML='<h2>Контроль мислення</h2><p>Прочитай умову до кінця. У кожної задачі лише одна перша спроба; після помилки — дві нові задачі, а первинний бал незмінний. Пропусків немає: можна відповісти «Не знаю».</p>';
- root.append(title);
- const ix=DEEP.challenges.findIndex((q,i)=>{const k=String(i),a=deepStore.challenge[k];return !a||(!a.ok&&!finalState.recovery[`challenge:${k}`]?.[1]);});
- const position=ix===-1?DEEP.challenges.length-1:ix,item=DEEP.challenges[position];
- const info=document.createElement('p');info.className='note';info.textContent=`Обов’язкова задача ${position+1} з ${DEEP.challenges.length} · ${item.skill}`;root.append(info);
- root.append(makeDeepBlock(item,String(position),'challenge'));
- if(ix===-1){const done=document.createElement('p');done.className='note';done.textContent='Усі задачі виконано. Перші відповіді збережено. Переглянь звіт для батьків.';root.append(done);}
- deepStats();
-};
-// Stop diagnostics from moving forward without answering every item.
-const existingRenderDiagnostic=renderDiagnostic;
-renderDiagnostic=function(){existingRenderDiagnostic();if(!state.diag||state.dReview)return;
- const d=state.diag,item=d.items[state.dIdx],root=$('diag-run'),card=root.querySelector('.qcard');if(!card)return;
- const controls=card.querySelector('.btnrow');const next=controls?.querySelector('button:last-child');if(!next)return;
- next.onclick=()=>{
-   const saved=state.dAnswers[item.n];let candidate=saved!==undefined?saved:state.dSelected;
-   const valid=item.type==='multi'?Array.isArray(candidate)&&candidate.length===item.fields.length&&candidate.every(x=>String(x??'').trim()!==''):candidate!==null&&candidate!==undefined&&String(candidate).trim()!=='';
-   if(!valid){alert('Це обов’язкове завдання. Заповни відповідь або натисни «Не знаю».');return;}
-   if(saved===undefined){state.dAnswers[item.n]=candidate;progress.diagDraft[d.id]={...state.dAnswers};save();}
-   if(state.dIdx===d.items.length-1){state.dReview=true;renderDiagnostic();}else{state.dIdx++;state.dSelected=null;renderDiagnostic();}
- };
- const idk=button('Не знаю',()=>{
-   if(state.dAnswers[item.n]!==undefined)return;
-   state.dAnswers[item.n]='Не знаю';progress.diagDraft[d.id]={...state.dAnswers};save();
-   if(state.dIdx===d.items.length-1){state.dReview=true;renderDiagnostic();}else{state.dIdx++;state.dSelected=null;renderDiagnostic();}
- },'secondary');if(state.dAnswers[item.n]===undefined)controls.insertBefore(idk,next);
-};
-// Replace original grading: "Не знаю" must not be incorrectly interpreted as zero for numeric answers.
-const previousDiagCheck=diagAnswerCorrect;
-diagAnswerCorrect=function(item,val){if(val==='Не знаю'||val===undefined||val===null)return false;return previousDiagCheck(item,val)};
-// Embed a formula exploration in the existing units tab, including limitations.
-const renderStudyFinalBase=renderStudy;
-renderStudy=function(){renderStudyFinalBase();if(state.sub!=='units')return;
- const root=$('study-content').querySelector('.article');if(!root)return;
- const panel=document.createElement('section');panel.className='unit-tree';panel.innerHTML='<h3>Розкрий фізичні зв’язки</h3><p>Формула — це не заклинання. Натисни на величину й простеж, звідки взялися її одиниці.</p><div class="unit-links"><button type="button" data-tree="work">Робота: A = F·s</button><button type="button" data-tree="force">Сила: F = ma</button><button type="button" data-tree="power">Потужність: P = A/t</button><button type="button" data-tree="speed">Шлях: s = vt</button></div><div class="unit-explain note" aria-live="polite"></div>';
- root.insertBefore(panel,root.firstChild);
- const display=panel.querySelector('.unit-explain');const explain={
- work:'A = F·s. Одиниці: Дж = Н·м. Якщо треба знайти силу, F = A/s; Дж/м = Н. Силу беремо вздовж переміщення.',
- force:'За другим законом Ньютона рівнодійна сила F = ma. Один ньютон — це кг·м/с². Для роботи рівнодійної сталої сили вздовж переміщення A = mas. Але не вся прикладена сила обов’язково є рівнодійною.',
- power:'P = A/t. Один ват = один джоуль за секунду. Якщо A = Fs і сила стала вздовж руху, для рівномірного руху можна записати P = Fv.',
- speed:'За рівномірного руху s = vt. Одиниці: (м/с)·с = м. Отже, A = Fvt лише за відповідних умов руху й сили.'};
- const set=v=>{display.textContent=explain[v];panel.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.tree===v))};panel.querySelectorAll('button').forEach(b=>b.onclick=()=>set(b.dataset.tree));set('work');
-};
-// Preserve original test scoring but extend the parent report with correction outcomes.
-const oldFinalReport=renderDeepResults;
-renderDeepResults=function(){oldFinalReport();const root=$('deep-parent-report');if(!root)return;
- const head=document.createElement('h3');head.textContent='Окремо: результати корекції';root.append(head);
- const stats=Object.entries(finalState.recovery).map(([id,items])=>({id,done:!!items[0]&&!!items[1],both:!!items[0]?.ok&&!!items[1]?.ok}));
- const attempts=Object.values(finalState.practice);const p=document.createElement('p');p.textContent=`Навчальні задачі (перша спроба): ${attempts.filter(x=>x.ok).length} правильних із ${attempts.length} завершених. Корекційні пари: ${stats.filter(x=>x.done).length} завершено, ${stats.filter(x=>x.both).length} пар вирішено без помилок. Ці результати не змінюють першої оцінки.`;root.append(p);
- const exportBtn=button('Завантажити повний звіт (JSON)',()=>{const payload={exported:new Date().toISOString(),firstMicro:deepStore.micro,firstChallenge:deepStore.challenge,firstPractice:finalState.practice,recovery:finalState.recovery,diagnostics:progress.diagnostics,disclaimer:'Локальний режим: результати браузера можуть бути стерті або змінені; це не захищений серверний журнал.'};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='fizikalab-full-report.json';a.click();URL.revokeObjectURL(url)},'secondary');root.append(exportBtn);
-};
-// Rebind tab navigation: reading mandatory tasks is required before entering the lesson quiz.
-document.querySelectorAll('.subtab').forEach(btn=>btn.onclick=()=>{
- if(btn.dataset.sub==='quiz'){
-  const tasks=DEEP.micro[state.lesson]||[];
-  const missing=tasks.some((_,i)=>{const k=`${state.lesson}:${i}`,a=deepStore.micro[k];return !a||(!a.ok&&!finalState.recovery[`micro:${k}`]?.[1]);});
-  if(missing){state.sub='read';renderLesson();alert('Спочатку виконай обов’язкові короткі задачі всередині статті.');return;}
- }
- state.sub=btn.dataset.sub;state.pIdx=0;state.pSelected=null;state.pChecked=false;renderLesson();
-});
-// Keep the first task visible on startup with mandatory gating.
-renderLesson();
-
-// The progress bar and overview now reflect one-time practice submissions rather than retryable legacy flags.
-updateOverall=function(){const n=Object.values(finalState.practice).filter(x=>x.ok).length;$('overall-progress').textContent=n+' / '+practice.length;$('overall-bar').style.width=(100*n/practice.length)+'%';};
-// Clearing local data is possible, but prominently confirmed (not a server-backed parent lock).
-$('reset-data').onclick=()=>{if(!confirm('Видалити ВСІ локальні результати, включно з першими відповідями та діагностикою? Цю дію не можна скасувати.'))return;[memoryKey,DEEP_KEY,FINAL_KEY].forEach(k=>localStorage.removeItem(k));location.reload();};
-updateOverall();
